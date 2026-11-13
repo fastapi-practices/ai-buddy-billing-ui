@@ -1,0 +1,15 @@
+name: Label fba Plugin
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  topic:
+    uses: fastapi-practices/fastapi_best_architecture_docs/.github/workflows/topic-plugin.yml@master

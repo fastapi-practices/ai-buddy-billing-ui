@@ -1,0 +1,8 @@
+[plugin]
+icon = 'https://wu-clan.github.io/picx-images-hosting/logo/fba.svg'
+summary = 'AI Buddy Billing UI'
+version = '0.1.0'
+description = 'AI Buddy 计费插件的前端实现'
+author = 'wu-clan'
+tags = ['ai', 'payment']
+depends_on = ['ai-buddy']
