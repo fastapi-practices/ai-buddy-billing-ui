@@ -2,7 +2,7 @@
 import type {
   AIBuddyBillingAccountResult,
   AIBuddyBillingTransactionResult,
-} from '../api';
+} from '../../api';
 
 import type { VbenFormProps } from '#/adapter/form';
 import type {
@@ -10,9 +10,9 @@ import type {
   VxeTableGridOptions,
 } from '#/adapter/vxe-table';
 
-import { onMounted, ref } from 'vue';
+import { computed, ref } from 'vue';
 
-import { useVbenModal, VbenButton } from '@vben/common-ui';
+import { Page, useVbenDrawer, useVbenModal, VbenButton } from '@vben/common-ui';
 import { IconifyIcon } from '@vben/icons';
 import { $t } from '@vben/locales';
 
@@ -25,18 +25,18 @@ import {
   adjustAIBuddyBillingAccountApi,
   getAIBuddyBillingAccountsApi,
   getAIBuddyBillingTransactionsApi,
-  getMyAIBuddyBillingAccountApi,
   rechargeAIBuddyBillingAccountApi,
-} from '../api';
+} from '../../api';
 import {
   createRechargeSchema,
   queryAccountSchema,
-  queryTransactionSchema,
+  queryUserTransactionSchema,
   transactionTypeLabel,
   useAccountColumns,
   useTransactionColumns,
-} from './data';
-import { formatBillingAmount } from './format';
+} from '../data';
+import { loadBillingCurrency } from '../currency';
+import { formatBillingAmount } from '../format';
 
 const TRANSACTION_TYPE_COLORS: Record<string, string> = {
   adjust: 'warning',
@@ -45,12 +45,10 @@ const TRANSACTION_TYPE_COLORS: Record<string, string> = {
   refund: 'processing',
 };
 
-const account = ref<AIBuddyBillingAccountResult>();
-const accountError = ref<null | string>(null);
-const accountLoading = ref(false);
 const isAdjustment = ref(false);
 const pendingUserId = ref<number>();
 const modalTitle = ref('');
+const currentUserId = ref<number>();
 
 const accountFormOptions: VbenFormProps = {
   collapsed: true,
@@ -65,7 +63,7 @@ const accountGridOptions: VxeTableGridOptions<AIBuddyBillingAccountResult> = {
   rowConfig: {
     keyField: 'id',
   },
-  height: 240,
+  height: 'auto',
   toolbarConfig: {
     custom: true,
     refresh: true,
@@ -78,6 +76,7 @@ const accountGridOptions: VxeTableGridOptions<AIBuddyBillingAccountResult> = {
   proxyConfig: {
     ajax: {
       query: async ({ page }, formValues) => {
+        await loadBillingCurrency();
         return await getAIBuddyBillingAccountsApi({
           page: page.currentPage,
           size: page.pageSize,
@@ -99,7 +98,7 @@ const transactionFormOptions: VbenFormProps = {
   submitButtonOptions: {
     content: $t('common.form.query'),
   },
-  schema: queryTransactionSchema,
+  schema: queryUserTransactionSchema,
 };
 
 const transactionGridOptions: VxeTableGridOptions<AIBuddyBillingTransactionResult> =
@@ -107,7 +106,7 @@ const transactionGridOptions: VxeTableGridOptions<AIBuddyBillingTransactionResul
     rowConfig: {
       keyField: 'id',
     },
-    height: 420,
+    height: 'auto',
     toolbarConfig: {
       custom: true,
       refresh: true,
@@ -120,9 +119,11 @@ const transactionGridOptions: VxeTableGridOptions<AIBuddyBillingTransactionResul
     proxyConfig: {
       ajax: {
         query: async ({ page }, formValues) => {
+          await loadBillingCurrency();
           return await getAIBuddyBillingTransactionsApi({
             page: page.currentPage,
             size: page.pageSize,
+            user_id: currentUserId.value,
             ...formValues,
           });
         },
@@ -130,7 +131,7 @@ const transactionGridOptions: VxeTableGridOptions<AIBuddyBillingTransactionResul
     },
   };
 
-const [TransactionGrid, transactionGridApi] = useVbenVxeGrid({
+const [TransactionGrid] = useVbenVxeGrid({
   formOptions: transactionFormOptions,
   gridOptions: transactionGridOptions,
 });
@@ -173,7 +174,6 @@ const [Modal, modalApi] = useVbenModal({
       );
       await modalApi.close();
       await accountGridApi.query();
-      await transactionGridApi.query();
     } finally {
       modalApi.unlock();
     }
@@ -192,6 +192,17 @@ const [Modal, modalApi] = useVbenModal({
   },
 });
 
+const [Drawer, drawerApi] = useVbenDrawer({
+  class: 'w-3/5',
+  contentClass: 'h-full overflow-hidden p-0',
+  destroyOnClose: true,
+  footer: false,
+});
+
+const drawerTitle = computed(() =>
+  $t('ai-buddy-billing.account.transactionTitle', [currentUserId.value ?? '']),
+);
+
 function openAccountModal(adjustment: boolean, userId?: number) {
   isAdjustment.value = adjustment;
   pendingUserId.value = userId;
@@ -204,83 +215,63 @@ function openAccountModal(adjustment: boolean, userId?: number) {
   modalApi.open();
 }
 
+function openTransactionDrawer(userId: number) {
+  currentUserId.value = userId;
+  drawerApi.open();
+}
+
 function onAccountActionClick({
   code,
   row,
 }: OnActionClickParams<AIBuddyBillingAccountResult>) {
-  openAccountModal(code === 'adjust', row.user_id);
-}
-
-async function loadAccount() {
-  accountLoading.value = true;
-  accountError.value = null;
-  try {
-    account.value = await getMyAIBuddyBillingAccountApi();
-  } catch (error) {
-    account.value = undefined;
-    accountError.value =
-      error instanceof Error
-        ? error.message
-        : $t('ai-buddy-billing.account.missing');
-  } finally {
-    accountLoading.value = false;
+  switch (code) {
+    case 'adjust': {
+      openAccountModal(true, row.user_id);
+      break;
+    }
+    case 'recharge': {
+      openAccountModal(false, row.user_id);
+      break;
+    }
+    case 'transactions': {
+      openTransactionDrawer(row.user_id);
+      break;
+    }
   }
 }
-
-onMounted(loadAccount);
 </script>
 
 <template>
-  <div>
-    <a-spin :spinning="accountLoading">
-      <div class="mb-4 rounded-[var(--radius)] border border-border p-4">
-        <div class="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <div class="text-muted-foreground text-xs">
-              {{ $t('ai-buddy-billing.account.balance') }}
-            </div>
-            <div class="mt-1 text-2xl font-semibold">
-              {{ formatBillingAmount(account?.balance ?? 0) }}
-              <span class="text-muted-foreground ml-1 text-sm">
-                {{ account?.currency ?? '' }}
-              </span>
-            </div>
-            <div v-if="accountError" class="text-destructive mt-1 text-xs">
-              {{ accountError }}
-            </div>
-          </div>
-          <div class="flex flex-wrap items-center gap-2">
-            <VbenButton variant="outline" @click="loadAccount">
-              <IconifyIcon
-                class="mr-1 size-4"
-                icon="material-symbols:refresh"
-              />
-              {{ $t('common.refresh') }}
-            </VbenButton>
-            <VbenButton @click="openAccountModal(false)">
-              <IconifyIcon class="mr-1 size-4" icon="material-symbols:add" />
-              {{ $t('ai-buddy-billing.account.recharge') }}
-            </VbenButton>
-            <VbenButton variant="outline" @click="openAccountModal(true)">
-              <IconifyIcon class="mr-1 size-4" icon="material-symbols:tune" />
-              {{ $t('ai-buddy-billing.account.adjust') }}
-            </VbenButton>
-          </div>
-        </div>
-      </div>
-    </a-spin>
-    <AccountGrid />
-    <TransactionGrid class="mt-4">
-      <template #transactionType="{ row }">
-        <a-tag
-          :color="TRANSACTION_TYPE_COLORS[row.transaction_type] ?? 'default'"
+  <Page auto-content-height>
+    <AccountGrid>
+      <template #toolbar-actions>
+        <VbenButton @click="openAccountModal(false)">
+          <IconifyIcon class="mr-1 size-4" icon="material-symbols:add" />
+          {{ $t('ai-buddy-billing.account.recharge') }}
+        </VbenButton>
+        <VbenButton
+          class="ml-2"
+          variant="outline"
+          @click="openAccountModal(true)"
         >
-          {{ transactionTypeLabel(row.transaction_type) }}
-        </a-tag>
+          <IconifyIcon class="mr-1 size-4" icon="material-symbols:tune" />
+          {{ $t('ai-buddy-billing.account.adjust') }}
+        </VbenButton>
       </template>
-    </TransactionGrid>
+    </AccountGrid>
     <Modal :title="modalTitle">
       <Form />
     </Modal>
-  </div>
+    <Drawer :title="drawerTitle">
+      <TransactionGrid>
+        <template #transactionType="{ row }">
+          <a-tag
+            :color="TRANSACTION_TYPE_COLORS[row.transaction_type] ?? 'default'"
+          >
+            {{ transactionTypeLabel(row.transaction_type) }}
+          </a-tag>
+        </template>
+      </TransactionGrid>
+    </Drawer>
+  </Page>
 </template>

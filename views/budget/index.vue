@@ -4,7 +4,7 @@ import type {
   AIBuddyBillingBudgetWindow,
   AIBuddyBillingDecimal,
   AIBuddyBillingStatusType,
-} from '../api';
+} from '../../api';
 
 import type { VbenFormProps } from '#/adapter/form';
 import type {
@@ -14,7 +14,7 @@ import type {
 
 import { computed, ref } from 'vue';
 
-import { confirm, useVbenModal, VbenButton } from '@vben/common-ui';
+import { confirm, Page, useVbenModal, VbenButton } from '@vben/common-ui';
 import { MaterialSymbolsAdd } from '@vben/icons';
 import { $t } from '@vben/locales';
 
@@ -28,13 +28,14 @@ import {
   deleteAIBuddyBillingBudgetApi,
   getAIBuddyBillingBudgetsApi,
   updateAIBuddyBillingBudgetApi,
-} from '../api';
+} from '../../api';
 import {
   budgetWindowLabel,
   createBudgetSchema,
   queryBudgetSchema,
   useBudgetColumns,
-} from './data';
+} from '../data';
+import { loadBillingCurrency } from '../currency';
 
 interface BudgetFormValues {
   usd_limit?: AIBuddyBillingDecimal | null;
@@ -66,7 +67,7 @@ const gridOptions: VxeTableGridOptions<AIBuddyBillingBudgetResult> = {
   rowConfig: {
     keyField: 'id',
   },
-  height: 520,
+  height: 'auto',
   toolbarConfig: {
     custom: true,
     refresh: true,
@@ -79,6 +80,7 @@ const gridOptions: VxeTableGridOptions<AIBuddyBillingBudgetResult> = {
   proxyConfig: {
     ajax: {
       query: async ({ page }, formValues) => {
+        await loadBillingCurrency();
         return await getAIBuddyBillingBudgetsApi({
           page: page.currentPage,
           size: page.pageSize,
@@ -97,7 +99,7 @@ const [Grid, gridApi] = useVbenVxeGrid({
 const budgetDetail = ref<AIBuddyBillingBudgetResult>();
 
 const modalTitle = computed(() =>
-  budgetDetail.value
+  budgetDetail.value?.id
     ? $t('ui.actionTitle.edit', [$t('ai-buddy-billing.budget.title')])
     : $t('ui.actionTitle.create', [$t('ai-buddy-billing.budget.title')]),
 );
@@ -135,7 +137,7 @@ const [Modal, modalApi] = useVbenModal({
         usd_limit: usdLimit,
         warn_at: values.warn_at ?? null,
       };
-      await (budgetDetail.value
+      await (budgetDetail.value?.id
         ? updateAIBuddyBillingBudgetApi(budgetDetail.value.id, limits)
         : createAIBuddyBillingBudgetApi({
             ...limits,
@@ -154,16 +156,20 @@ const [Modal, modalApi] = useVbenModal({
       return;
     }
 
+    // getData() 在未传数据时返回空对象，需按主键判断是新增还是编辑
     const data = modalApi.getData<AIBuddyBillingBudgetResult>();
+    const budget = data?.id ? data : undefined;
     formApi.resetForm();
-    formApi.setState({ schema: createBudgetSchema({ isEdit: Boolean(data) }) });
-    budgetDetail.value = data;
-    if (data) {
+    formApi.setState({
+      schema: createBudgetSchema({ isEdit: Boolean(budget) }),
+    });
+    budgetDetail.value = budget;
+    if (budget) {
       void formApi.setValues({
-        status: data.status,
-        token_limit: data.token_limit ?? undefined,
-        usd_limit: data.usd_limit ?? undefined,
-        warn_at: data.warn_at ?? undefined,
+        status: budget.status,
+        token_limit: budget.token_limit ?? undefined,
+        usd_limit: budget.usd_limit ?? undefined,
+        warn_at: budget.warn_at ?? undefined,
       });
     }
   },
@@ -201,7 +207,7 @@ function onActionClick({
 </script>
 
 <template>
-  <div>
+  <Page auto-content-height>
     <Grid>
       <template #toolbar-actions>
         <VbenButton @click="() => modalApi.setData(null).open()">
@@ -213,5 +219,5 @@ function onActionClick({
     <Modal :title="modalTitle">
       <Form />
     </Modal>
-  </div>
+  </Page>
 </template>

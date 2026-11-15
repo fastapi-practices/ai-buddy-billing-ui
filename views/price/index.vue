@@ -1,9 +1,13 @@
 <script setup lang="ts">
-import type { AIBuddyBillingPriceResult } from '../api';
+import type {
+  AIBuddyBillingPriceResult,
+  AIBuddyBillingPriceTier,
+  AIBuddyBillingPriceWindow,
+} from '../../api';
 import type {
   AIBuddyBillingPriceFormValues,
   AIBuddyBillingPriceUpdateFormValues,
-} from './price-params';
+} from '../price-params';
 
 import type { VbenFormProps } from '#/adapter/form';
 import type {
@@ -13,8 +17,8 @@ import type {
 
 import { computed, onMounted, ref } from 'vue';
 
-import { confirm, useVbenModal, VbenButton } from '@vben/common-ui';
-import { MaterialSymbolsAdd } from '@vben/icons';
+import { confirm, Page, useVbenModal, VbenButton } from '@vben/common-ui';
+import { IconifyIcon, MaterialSymbolsAdd } from '@vben/icons';
 import { $t } from '@vben/locales';
 
 import { message } from 'antdv-next';
@@ -30,32 +34,70 @@ import {
   getAIBuddyBillingPricesApi,
   getAIBuddyBillingProviderOptionsApi,
   updateAIBuddyBillingPriceApi,
-} from '../api';
-import type { BillingSelectOption } from './data';
+} from '../../api';
+import type { BillingSelectOption } from '../data';
 
 import {
   BILLING_DATE_TIME_VALUE_FORMAT,
   createPriceSchema,
+  priceSourceLabel,
   queryPriceSchema,
   usePriceColumns,
-} from './data';
+} from '../data';
+import { loadBillingCurrency } from '../currency';
 import {
   createAIBuddyBillingPricePayload,
   createAIBuddyBillingPriceUpdatePayload,
   isPriceActive,
-} from './price-params';
+} from '../price-params';
+import ContextTierEditor from './context-tier-editor.vue';
+import PriceSyncDrawer from './price-sync-drawer.vue';
+import TimeWindowEditor from './time-window-editor.vue';
 
 const DATE_TIME_FORMAT = 'YYYY-MM-DD HH:mm:ss';
 
 const providerOptions = ref<BillingSelectOption[]>([]);
 const modelOptions = ref<BillingSelectOption[]>([]);
 const priceDetail = ref<AIBuddyBillingPriceResult>();
+const syncDrawerRef = ref<InstanceType<typeof PriceSyncDrawer>>();
+const timeWindows = ref<AIBuddyBillingPriceWindow[]>([]);
+const contextTiers = ref<AIBuddyBillingPriceTier[]>([]);
 
 const modalTitle = computed(() =>
   priceDetail.value
     ? $t('ui.actionTitle.edit', [$t('ai-buddy-billing.price.title')])
     : $t('ai-buddy-billing.price.create'),
 );
+
+/** 失效时间必须晚于生效时间，与后端校验保持一致 */
+function isEffectiveRangeValid(
+  effectiveTo?: null | string,
+  effectiveFrom?: null | string,
+): boolean {
+  if (!effectiveTo || !effectiveFrom) {
+    return true;
+  }
+  return new Date(effectiveTo).getTime() > new Date(effectiveFrom).getTime();
+}
+
+/** 判断同一供应商与模型是否已存在未失效价格 */
+async function hasUnexpiredPrice(
+  providerId: number,
+  modelId: string,
+  effectiveFrom: string,
+): Promise<boolean> {
+  const { items } = await getAIBuddyBillingPricesApi({
+    model_id: modelId,
+    page: 1,
+    provider_id: providerId,
+    size: 100,
+  });
+  const start = new Date(effectiveFrom).getTime();
+  return items.some(
+    (item) =>
+      !item.effective_to || new Date(item.effective_to).getTime() > start,
+  );
+}
 
 function providerName(providerId: number) {
   return (
@@ -70,13 +112,21 @@ async function loadProviderOptions() {
   }
 
   const providers = await getAIBuddyBillingProviderOptionsApi();
-  providerOptions.value = providers
-    .filter((provider) => provider.status === 1)
-    .map((provider) => ({ label: provider.name, value: provider.id }));
+  providerOptions.value = [
+    // 供应商 0 + 模型 * 为保底价，用于未匹配到模型价格的用量
+    { label: $t('ai-buddy-billing.price.defaultOption'), value: 0 },
+    ...providers
+      .filter((provider) => provider.status === 1)
+      .map((provider) => ({ label: provider.name, value: provider.id })),
+  ];
 }
 
 async function handleProviderChange(providerId?: null | number) {
   modelOptions.value = [];
+  if (providerId === 0) {
+    await formApi.setValues({ model_id: '*' });
+    return;
+  }
   if (!providerId) {
     return;
   }
@@ -103,7 +153,7 @@ const gridOptions: VxeTableGridOptions<AIBuddyBillingPriceResult> = {
   rowConfig: {
     keyField: 'id',
   },
-  height: 520,
+  height: 'auto',
   toolbarConfig: {
     custom: true,
     refresh: true,
@@ -116,6 +166,7 @@ const gridOptions: VxeTableGridOptions<AIBuddyBillingPriceResult> = {
   proxyConfig: {
     ajax: {
       query: async ({ page }, formValues) => {
+        await Promise.all([loadBillingCurrency(), loadProviderOptions()]);
         return await getAIBuddyBillingPricesApi({
           page: page.currentPage,
           size: page.pageSize,
@@ -143,7 +194,7 @@ const [Form, formApi] = useVbenForm({
 });
 
 const [Modal, modalApi] = useVbenModal({
-  class: 'w-1/2',
+  class: 'w-2/3',
   destroyOnClose: true,
   async onConfirm() {
     const { valid } = await formApi.validate();
@@ -154,17 +205,45 @@ const [Modal, modalApi] = useVbenModal({
     modalApi.lock();
 
     try {
-      if (priceDetail.value) {
+      if (priceDetail.value?.id) {
         const values =
           await formApi.getValues<AIBuddyBillingPriceUpdateFormValues>();
-        await updateAIBuddyBillingPriceApi(
-          priceDetail.value.id,
-          createAIBuddyBillingPriceUpdatePayload(values),
-        );
+        if (
+          !isEffectiveRangeValid(
+            values.effective_to,
+            priceDetail.value.effective_from,
+          )
+        ) {
+          message.warning($t('ai-buddy-billing.price.effectiveRangeInvalid'));
+          return;
+        }
+        await updateAIBuddyBillingPriceApi(priceDetail.value.id, {
+          ...createAIBuddyBillingPriceUpdatePayload(values),
+          context_tiers: contextTiers.value,
+          time_windows: timeWindows.value,
+        });
         message.success($t('ai-buddy-billing.price.updated'));
       } else {
         const values = await formApi.getValues<AIBuddyBillingPriceFormValues>();
-        await createAIBuddyBillingPriceApi(createAIBuddyBillingPricePayload(values));
+        if (
+          !isEffectiveRangeValid(values.effective_to, values.effective_from)
+        ) {
+          message.warning($t('ai-buddy-billing.price.effectiveRangeInvalid'));
+          return;
+        }
+        const providerId = Number(values.provider_id);
+        const modelId = providerId === 0 ? '*' : (values.model_id ?? '').trim();
+        if (
+          await hasUnexpiredPrice(providerId, modelId, values.effective_from)
+        ) {
+          message.warning($t('ai-buddy-billing.price.duplicatePrice'));
+          return;
+        }
+        await createAIBuddyBillingPriceApi({
+          ...createAIBuddyBillingPricePayload({ ...values, model_id: modelId }),
+          context_tiers: contextTiers.value,
+          time_windows: timeWindows.value,
+        });
         message.success($t('ai-buddy-billing.price.created'));
       }
       await modalApi.close();
@@ -179,37 +258,41 @@ const [Modal, modalApi] = useVbenModal({
     }
 
     await loadProviderOptions();
+    // getData() 在未传数据时返回空对象，需按主键判断是新增还是编辑
     const data = modalApi.getData<AIBuddyBillingPriceResult>();
-    priceDetail.value = data;
+    const price = data?.id ? data : undefined;
+    priceDetail.value = price;
     formApi.resetForm();
     modelOptions.value = [];
     await formApi.setState({
       schema: createPriceSchema({
-        isEdit: Boolean(data),
+        isEdit: Boolean(price),
         modelOptions: () => modelOptions.value,
         onProviderChange: handleProviderChange,
         providerOptions: () => providerOptions.value,
       }),
     });
-    if (data) {
-      await handleProviderChange(data.provider_id);
+    timeWindows.value = price ? [...(price.time_windows ?? [])] : [];
+    contextTiers.value = price ? [...(price.context_tiers ?? [])] : [];
+    if (price) {
+      await handleProviderChange(price.provider_id);
       await formApi.setValues({
-        cache_audio_read_price: Number(data.cache_audio_read_price ?? 0),
-        cache_read_price: Number(data.cache_read_price ?? 0),
-        cache_write_price: Number(data.cache_write_price ?? 0),
-        effective_from: dayjs(data.effective_from).format(
+        cache_audio_read_price: Number(price.cache_audio_read_price ?? 0),
+        cache_read_price: Number(price.cache_read_price ?? 0),
+        cache_write_price: Number(price.cache_write_price ?? 0),
+        effective_from: dayjs(price.effective_from).format(
           BILLING_DATE_TIME_VALUE_FORMAT,
         ),
-        effective_to: data.effective_to
-          ? dayjs(data.effective_to).format(BILLING_DATE_TIME_VALUE_FORMAT)
+        effective_to: price.effective_to
+          ? dayjs(price.effective_to).format(BILLING_DATE_TIME_VALUE_FORMAT)
           : undefined,
-        image_price: Number(data.image_price ?? 0),
-        input_audio_price: Number(data.input_audio_price ?? 0),
-        input_price: Number(data.input_price ?? 0),
-        model_id: data.model_id,
-        output_audio_price: Number(data.output_audio_price ?? 0),
-        output_price: Number(data.output_price ?? 0),
-        provider_id: data.provider_id,
+        image_price: Number(price.image_price ?? 0),
+        input_audio_price: Number(price.input_audio_price ?? 0),
+        input_price: Number(price.input_price ?? 0),
+        model_id: price.model_id,
+        output_audio_price: Number(price.output_audio_price ?? 0),
+        output_price: Number(price.output_price ?? 0),
+        provider_id: price.provider_id,
       });
       return;
     }
@@ -253,13 +336,26 @@ onMounted(loadProviderOptions);
 </script>
 
 <template>
-  <div>
+  <Page auto-content-height>
     <Grid>
       <template #toolbar-actions>
         <VbenButton @click="() => modalApi.setData(null).open()">
           <MaterialSymbolsAdd class="size-5" />
           {{ $t('ai-buddy-billing.price.create') }}
         </VbenButton>
+        <VbenButton
+          class="ml-2"
+          variant="outline"
+          @click="syncDrawerRef?.open()"
+        >
+          <IconifyIcon class="mr-1 size-4" icon="material-symbols:sync" />
+          {{ $t('ai-buddy-billing.price.sync.button') }}
+        </VbenButton>
+      </template>
+      <template #source="{ row }">
+        <a-tag :color="row.source === 'models.dev' ? 'processing' : 'default'">
+          {{ priceSourceLabel(row.source) }}
+        </a-tag>
       </template>
       <template #effectiveTo="{ row }">
         <span>{{ effectiveToText(row) }}</span>
@@ -276,6 +372,15 @@ onMounted(loadProviderOptions);
     </Grid>
     <Modal :title="modalTitle">
       <Form />
+      <div class="mt-5 flex flex-col gap-5">
+        <TimeWindowEditor v-model="timeWindows" />
+        <ContextTierEditor v-model="contextTiers" />
+      </div>
     </Modal>
-  </div>
+    <PriceSyncDrawer
+      ref="syncDrawerRef"
+      :provider-options="providerOptions"
+      @synced="gridApi.query()"
+    />
+  </Page>
 </template>

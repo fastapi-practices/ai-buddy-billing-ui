@@ -1,12 +1,15 @@
 <script setup lang="ts">
-import type { AIBuddyBillingLedgerResult, AIBuddyBillingSummaryResult } from '../api';
+import type {
+  AIBuddyBillingLedgerResult,
+  AIBuddyBillingSummaryResult,
+} from '../../api';
 
 import type { VbenFormProps } from '#/adapter/form';
 import type { VxeTableGridOptions } from '#/adapter/vxe-table';
 
 import { computed, onMounted, ref } from 'vue';
 
-import { VbenButton } from '@vben/common-ui';
+import { Page, VbenButton } from '@vben/common-ui';
 import { IconifyIcon } from '@vben/icons';
 import { $t } from '@vben/locales';
 
@@ -19,9 +22,14 @@ import {
   getAIBuddyBillingProviderOptionsApi,
   getAIBuddyBillingSummaryApi,
   reconcileAIBuddyBillingApi,
-} from '../api';
-import { ledgerStatusLabel, queryLedgerSchema, useLedgerColumns } from './data';
-import { formatBillingAmount, formatBillingTokens } from './format';
+} from '../../api';
+import {
+  ledgerStatusLabel,
+  queryLedgerSchema,
+  useLedgerColumns,
+} from '../data';
+import { loadBillingCurrency } from '../currency';
+import { formatBillingAmount, formatBillingTokens } from '../format';
 
 const LEDGER_STATUS_COLORS: Record<string, string> = {
   billed: 'success',
@@ -29,6 +37,7 @@ const LEDGER_STATUS_COLORS: Record<string, string> = {
   unpriced: 'default',
 };
 
+const providerOptions = ref<{ label: string; value: number }[]>([]);
 const providerNames = ref<Map<number, string>>(new Map());
 const summary = ref<AIBuddyBillingSummaryResult>();
 const summaryLoading = ref(false);
@@ -44,14 +53,16 @@ const formOptions: VbenFormProps = {
   submitButtonOptions: {
     content: $t('common.form.query'),
   },
-  schema: queryLedgerSchema,
+  schema: queryLedgerSchema({
+    providerOptions: () => providerOptions.value,
+  }),
 };
 
 const gridOptions: VxeTableGridOptions<AIBuddyBillingLedgerResult> = {
   rowConfig: {
     keyField: 'id',
   },
-  height: 520,
+  height: 'auto',
   toolbarConfig: {
     custom: true,
     refresh: true,
@@ -64,6 +75,7 @@ const gridOptions: VxeTableGridOptions<AIBuddyBillingLedgerResult> = {
   proxyConfig: {
     ajax: {
       query: async ({ page }, formValues) => {
+        await Promise.all([loadBillingCurrency(), loadProviderNames()]);
         void loadSummary(formValues);
         return await getAIBuddyBillingLedgerApi({
           page: page.currentPage,
@@ -104,6 +116,10 @@ const summaryItems = computed(() => {
       value: formatBillingTokens(data?.cache_write_tokens ?? 0),
     },
     {
+      label: $t('ai-buddy-billing.usage.reasoningTokens'),
+      value: formatBillingTokens(data?.output_reasoning_tokens ?? 0),
+    },
+    {
       label: $t('ai-buddy-billing.usage.images'),
       value: formatBillingTokens(data?.generated_images ?? 0),
     },
@@ -138,6 +154,10 @@ async function loadProviderNames() {
   providerNames.value = new Map(
     providers.map((provider) => [provider.id, provider.name]),
   );
+  providerOptions.value = providers.map((provider) => ({
+    label: provider.name,
+    value: provider.id,
+  }));
 }
 
 async function handleReconcile() {
@@ -162,38 +182,42 @@ onMounted(loadProviderNames);
 </script>
 
 <template>
-  <div>
-    <div class="mb-3 flex flex-wrap items-center gap-2">
-      <VbenButton
-        :loading="reconcileLoading"
-        variant="outline"
-        @click="handleReconcile"
-      >
-        <IconifyIcon class="mr-1 size-4" icon="material-symbols:sync" />
-        {{ $t('ai-buddy-billing.usage.reconcile') }}
-      </VbenButton>
-      <span class="text-muted-foreground text-xs">
-        {{ $t('ai-buddy-billing.usage.reconcileHelp') }}
-      </span>
-    </div>
-    <a-spin :spinning="summaryLoading">
-      <div class="mb-4 grid grid-cols-2 gap-3 lg:grid-cols-4">
-        <div
-          v-for="item in summaryItems"
-          :key="item.label"
-          class="rounded-[var(--radius)] border border-border p-3"
-        >
-          <div class="text-muted-foreground text-xs">{{ item.label }}</div>
-          <div class="mt-1 text-lg font-semibold">{{ item.value }}</div>
+  <Page auto-content-height>
+    <div class="flex h-full flex-col gap-3">
+      <a-spin :spinning="summaryLoading">
+        <div class="grid grid-cols-2 gap-2 md:grid-cols-3 xl:grid-cols-9">
+          <div
+            v-for="item in summaryItems"
+            :key="item.label"
+            class="rounded-[var(--radius)] border border-border p-2.5"
+          >
+            <div class="text-muted-foreground text-xs">{{ item.label }}</div>
+            <div class="mt-1 text-base font-semibold">{{ item.value }}</div>
+          </div>
         </div>
+      </a-spin>
+      <div class="min-h-0 flex-1">
+        <Grid>
+          <template #toolbar-actions>
+            <VbenButton
+              :loading="reconcileLoading"
+              variant="outline"
+              @click="handleReconcile"
+            >
+              <IconifyIcon class="mr-1 size-4" icon="material-symbols:sync" />
+              {{ $t('ai-buddy-billing.usage.reconcile') }}
+            </VbenButton>
+            <span class="text-muted-foreground ml-2 text-xs">
+              {{ $t('ai-buddy-billing.usage.reconcileHelp') }}
+            </span>
+          </template>
+          <template #ledgerStatus="{ row }">
+            <a-tag :color="LEDGER_STATUS_COLORS[row.status] ?? 'default'">
+              {{ ledgerStatusLabel(row.status) }}
+            </a-tag>
+          </template>
+        </Grid>
       </div>
-    </a-spin>
-    <Grid>
-      <template #ledgerStatus="{ row }">
-        <a-tag :color="LEDGER_STATUS_COLORS[row.status] ?? 'default'">
-          {{ ledgerStatusLabel(row.status) }}
-        </a-tag>
-      </template>
-    </Grid>
-  </div>
+    </div>
+  </Page>
 </template>

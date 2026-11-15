@@ -4,6 +4,8 @@ import type {
   AIBuddyBillingBudgetWindow,
   AIBuddyBillingLedgerStatus,
   AIBuddyBillingPriceResult,
+  AIBuddyBillingPriceSource,
+  AIBuddyBillingPriceSyncStatus,
   AIBuddyBillingTransactionType,
 } from '../api';
 
@@ -18,7 +20,9 @@ import {
   formatBillingAmount,
   formatBillingRatio,
   formatBillingTokens,
+  formatBillingUnitPrice,
 } from './format';
+import { settlementCurrencyCode } from './currency';
 import { isPriceActive } from './price-params';
 
 export interface BillingSelectOption<T = number | string> {
@@ -59,8 +63,121 @@ export function ledgerStatusLabel(status: AIBuddyBillingLedgerStatus): string {
   return $t(`ai-buddy-billing.ledgerStatus.${status}`);
 }
 
-export function transactionTypeLabel(type: AIBuddyBillingTransactionType): string {
+export function transactionTypeLabel(
+  type: AIBuddyBillingTransactionType,
+): string {
   return $t(`ai-buddy-billing.transactionType.${type}`);
+}
+
+export function priceSourceLabel(source: AIBuddyBillingPriceSource): string {
+  return $t(`ai-buddy-billing.price.source.${source.replaceAll(/[.-]/g, '_')}`);
+}
+
+export function priceSyncStatusLabel(
+  status: AIBuddyBillingPriceSyncStatus,
+): string {
+  return $t(`ai-buddy-billing.price.sync.status.${status}`);
+}
+
+/** ISO 星期选项（1-7） */
+export function weekdayOptions(): BillingSelectOption<number>[] {
+  return [1, 2, 3, 4, 5, 6, 7].map((day) => ({
+    label: $t(`ai-buddy-billing.weekday.${day}`),
+    value: day,
+  }));
+}
+
+/**
+ * 汇总峰谷时段与阶梯价特性的展示文本
+ *
+ * @param price 价格记录
+ * @returns 特性展示文本
+ */
+export function priceFeatureText(price: AIBuddyBillingPriceResult): string {
+  const features: string[] = [];
+  if (price.is_default) {
+    features.push($t('ai-buddy-billing.price.defaultPrice'));
+  }
+  if (price.time_windows?.length) {
+    features.push(
+      $t('ai-buddy-billing.price.windowCount', [price.time_windows.length]),
+    );
+  }
+  if (price.context_tiers?.length) {
+    features.push(
+      $t('ai-buddy-billing.price.tierCount', [price.context_tiers.length]),
+    );
+  }
+  return features.length > 0 ? features.join(' / ') : '-';
+}
+
+/** 价格字段对应的展示文案 */
+const PRICE_FIELD_LABEL_KEYS: Record<string, string> = {
+  cache_audio_read_price: 'ai-buddy-billing.price.audioCachePrice',
+  cache_read_price: 'ai-buddy-billing.price.cacheReadPrice',
+  cache_write_price: 'ai-buddy-billing.price.cacheWritePrice',
+  context_tiers: 'ai-buddy-billing.price.contextTiers',
+  image_price: 'ai-buddy-billing.price.imagePrice',
+  input_audio_price: 'ai-buddy-billing.price.audioInputPrice',
+  input_price: 'ai-buddy-billing.price.inputPrice',
+  output_audio_price: 'ai-buddy-billing.price.audioOutputPrice',
+  output_price: 'ai-buddy-billing.price.outputPrice',
+  time_windows: 'ai-buddy-billing.price.timeWindows',
+};
+
+/** 结构化的价格字段（JSON 数组），明细里只展示字段名 */
+const STRUCTURED_PRICE_FIELDS = new Set(['context_tiers', 'time_windows']);
+
+/**
+ * 获取价格字段的展示文案
+ *
+ * @param field 后端价格字段名
+ * @returns 展示文案
+ */
+export function priceFieldLabel(field: string): string {
+  const key = PRICE_FIELD_LABEL_KEYS[field];
+  return key ? $t(key) : field;
+}
+
+/**
+ * 判断价格字段是否为数组结构（峰谷时段 / 上下文阶梯价）
+ *
+ * @param field 后端价格字段名
+ * @returns 是否为数组结构
+ */
+export function isStructuredPriceField(field: string): boolean {
+  return STRUCTURED_PRICE_FIELDS.has(field);
+}
+
+/**
+ * 格式化同步明细中的单价，非数值内容原样返回
+ *
+ * @param value 后端返回的单价字符串
+ * @returns 展示文本
+ */
+export function formatSyncPriceDelta(
+  current?: null | string,
+  next?: null | string,
+): string {
+  const before = Number(current);
+  const after = Number(next);
+  if (!Number.isFinite(before) || !Number.isFinite(after)) {
+    return '';
+  }
+  const diff = after - before;
+  if (diff === 0) {
+    return '';
+  }
+  const sign = diff > 0 ? '+' : '-';
+  return `${sign}${formatBillingUnitPrice(Math.abs(diff))}`;
+}
+
+export function formatSyncPriceValue(value?: null | string): string {
+  if (value === null || value === undefined || value === '') {
+    return '-';
+  }
+  const amount = Number(value);
+  return Number.isFinite(amount) ? formatBillingUnitPrice(amount) : value;
 }
 
 export function budgetWindowOptions(): BillingSelectOption<AIBuddyBillingBudgetWindow>[] {
@@ -98,30 +215,53 @@ function dateTimeSchema(fieldName: string, label: string): VbenFormSchema {
   };
 }
 
-export const queryLedgerSchema: VbenFormSchema[] = [
-  {
-    component: 'Input',
-    fieldName: 'conversation_id',
-    label: $t('ai-buddy-billing.usage.conversation'),
-  },
-  {
-    component: 'Input',
-    fieldName: 'model_id',
-    label: $t('ai-buddy-billing.price.model'),
-  },
-  {
-    component: 'Select',
-    componentProps: {
-      allowClear: true,
-      class: 'w-full',
-      options: ledgerStatusOptions(),
+export function queryLedgerSchema(options: {
+  providerOptions: () => BillingSelectOption[];
+}): VbenFormSchema[] {
+  return [
+    {
+      component: 'InputNumber',
+      componentProps: {
+        class: 'w-full',
+        min: 1,
+      },
+      fieldName: 'user_id',
+      label: $t('ai-buddy-billing.account.userId'),
     },
-    fieldName: 'status',
-    label: $t('ai-buddy-billing.usage.status'),
-  },
-  dateTimeSchema('start_time', $t('ai-buddy-billing.usage.startTime')),
-  dateTimeSchema('end_time', $t('ai-buddy-billing.usage.endTime')),
-];
+    {
+      component: 'Input',
+      fieldName: 'conversation_id',
+      label: $t('ai-buddy-billing.usage.conversation'),
+    },
+    {
+      component: 'Select',
+      componentProps: () => ({
+        allowClear: true,
+        class: 'w-full',
+        options: options.providerOptions(),
+      }),
+      fieldName: 'provider_id',
+      label: $t('ai-buddy-billing.price.provider'),
+    },
+    {
+      component: 'Input',
+      fieldName: 'model_id',
+      label: $t('ai-buddy-billing.price.model'),
+    },
+    {
+      component: 'Select',
+      componentProps: {
+        allowClear: true,
+        class: 'w-full',
+        options: ledgerStatusOptions(),
+      },
+      fieldName: 'status',
+      label: $t('ai-buddy-billing.usage.status'),
+    },
+    dateTimeSchema('start_time', $t('ai-buddy-billing.usage.startTime')),
+    dateTimeSchema('end_time', $t('ai-buddy-billing.usage.endTime')),
+  ];
+}
 
 export function queryPriceSchema(options: {
   providerOptions: () => BillingSelectOption[];
@@ -177,6 +317,7 @@ export function createPriceSchema(options: {
         options: options.providerOptions(),
       }),
       fieldName: 'provider_id',
+      help: $t('ai-buddy-billing.price.providerHelp'),
       label: $t('ai-buddy-billing.price.provider'),
       ...(isEdit ? {} : { rules: 'selectRequired' as const }),
       dependencies: {
@@ -188,13 +329,23 @@ export function createPriceSchema(options: {
     },
     {
       component: 'AutoComplete',
-      componentProps: () => ({
-        class: 'w-full',
-        disabled: isEdit,
-        options: options.modelOptions(),
-      }),
+      componentProps: (values) => {
+        const isDefault = Number(values.provider_id) === 0;
+        return {
+          class: 'w-full',
+          disabled: isEdit || isDefault,
+          options: isDefault
+            ? [{ label: '*', value: '*' }]
+            : options.modelOptions(),
+        };
+      },
       fieldName: 'model_id',
-      help: isEdit ? undefined : $t('ai-buddy-billing.price.modelHelp'),
+      help: (values) => {
+        if (Number(values.provider_id) === 0) {
+          return $t('ai-buddy-billing.price.defaultModelHelp');
+        }
+        return isEdit ? '' : $t('ai-buddy-billing.price.modelHelp');
+      },
       label: $t('ai-buddy-billing.price.model'),
       ...(isEdit ? {} : { rules: 'required' as const }),
     },
@@ -211,17 +362,23 @@ export function createPriceSchema(options: {
     ).map(([fieldName, label]) => ({
       component: 'InputNumber' as const,
       componentProps: {
+        addonAfter: settlementCurrencyCode(),
         class: 'w-full',
         min: 0,
         precision: 6,
       },
       defaultValue: 0,
       fieldName,
+      help:
+        fieldName === 'input_price'
+          ? $t('ai-buddy-billing.price.moneyHelp')
+          : undefined,
       label: $t(`ai-buddy-billing.price.${label}`),
     })),
     {
       component: 'InputNumber',
       componentProps: {
+        addonAfter: settlementCurrencyCode(),
         class: 'w-full',
         min: 0,
         precision: 6,
@@ -257,6 +414,22 @@ export const queryTransactionSchema: VbenFormSchema[] = [
     fieldName: 'user_id',
     label: $t('ai-buddy-billing.account.userId'),
   },
+  {
+    component: 'Select',
+    componentProps: {
+      allowClear: true,
+      class: 'w-full',
+      options: transactionTypeOptions(),
+    },
+    fieldName: 'transaction_type',
+    label: $t('ai-buddy-billing.account.transactionType'),
+  },
+  dateTimeSchema('start_time', $t('ai-buddy-billing.usage.startTime')),
+  dateTimeSchema('end_time', $t('ai-buddy-billing.usage.endTime')),
+];
+
+/** 账户流水查询，用户由列表行指定，无需手动输入 */
+export const queryUserTransactionSchema: VbenFormSchema[] = [
   {
     component: 'Select',
     componentProps: {
@@ -337,6 +510,7 @@ export function createBudgetSchema(options: {
     {
       component: 'InputNumber',
       componentProps: {
+        addonAfter: settlementCurrencyCode(),
         class: 'w-full',
         min: 0,
         precision: 4,
@@ -402,6 +576,7 @@ export function createRechargeSchema(options: {
     {
       component: 'InputNumber',
       componentProps: {
+        addonAfter: settlementCurrencyCode(),
         class: 'w-full',
         precision: 4,
         ...(options.isAdjustment ? {} : { min: 0.0001 }),
@@ -431,7 +606,7 @@ export function useLedgerColumns(
   providerName: (providerId: number) => string,
 ): VxeGridProps['columns'] {
   return [
-    { field: 'seq', title: $t('common.table.id'), type: 'seq', width: 50 },
+    { field: 'seq', title: $t('common.table.id'), type: 'seq', width: 60 },
     {
       field: 'usage_time',
       title: $t('ai-buddy-billing.usage.usageTime'),
@@ -439,76 +614,113 @@ export function useLedgerColumns(
       formatter: 'formatDateTime',
     },
     {
+      field: 'user_id',
+      title: $t('ai-buddy-billing.account.userId'),
+      width: 100,
+    },
+    {
       field: 'conversation_id',
       title: $t('ai-buddy-billing.usage.conversation'),
-      minWidth: 150,
       showOverflow: 'tooltip',
+      minWidth: 210,
     },
     {
       field: 'provider_id',
       title: $t('ai-buddy-billing.price.provider'),
-      minWidth: 120,
       formatter: ({ cellValue }) => providerName(Number(cellValue)),
+      minWidth: 130,
     },
     {
       field: 'model_id',
       title: $t('ai-buddy-billing.price.model'),
-      minWidth: 170,
       showOverflow: 'tooltip',
+      minWidth: 200,
     },
     {
       field: 'input_tokens',
       title: $t('ai-buddy-billing.usage.inputTokens'),
-      width: 110,
       align: 'right',
       formatter: ({ cellValue }) => formatBillingTokens(cellValue),
+      width: 120,
     },
     {
       field: 'output_tokens',
       title: $t('ai-buddy-billing.usage.outputTokens'),
-      width: 110,
       align: 'right',
       formatter: ({ cellValue }) => formatBillingTokens(cellValue),
+      width: 120,
     },
     {
       field: 'cache_read_tokens',
       title: $t('ai-buddy-billing.usage.cacheReadTokens'),
-      width: 120,
       align: 'right',
       formatter: ({ cellValue }) => formatBillingTokens(cellValue),
+      width: 140,
     },
     {
       field: 'cache_write_tokens',
       title: $t('ai-buddy-billing.usage.cacheWriteTokens'),
-      width: 120,
       align: 'right',
       formatter: ({ cellValue }) => formatBillingTokens(cellValue),
+      width: 140,
+    },
+    {
+      field: 'output_reasoning_tokens',
+      title: $t('ai-buddy-billing.usage.reasoningTokens'),
+      align: 'right',
+      formatter: ({ cellValue }) => formatBillingTokens(cellValue),
+      width: 140,
+    },
+    {
+      field: 'input_audio_tokens',
+      title: $t('ai-buddy-billing.usage.audioTokens'),
+      align: 'right',
+      formatter: ({ row }) =>
+        [
+          formatBillingTokens(row.input_audio_tokens),
+          formatBillingTokens(row.output_audio_tokens),
+          formatBillingTokens(row.cache_audio_read_tokens),
+        ].join(' / '),
+      minWidth: 200,
     },
     {
       field: 'generated_images',
       title: $t('ai-buddy-billing.usage.images'),
-      width: 90,
       align: 'right',
+      width: 100,
     },
     {
       field: 'provider_cost',
       title: $t('ai-buddy-billing.usage.providerCost'),
-      width: 120,
       align: 'right',
       formatter: ({ cellValue }) => formatBillingAmount(cellValue),
+      width: 130,
     },
     {
       field: 'billed_cost',
       title: $t('ai-buddy-billing.usage.billedCost'),
-      width: 120,
       align: 'right',
       formatter: ({ cellValue }) => formatBillingAmount(cellValue),
+      width: 130,
+    },
+    {
+      field: 'price_multiplier',
+      title: $t('ai-buddy-billing.usage.pricing'),
+      formatter: ({ row }) =>
+        [
+          `x${Number(row.price_multiplier ?? 1)}`,
+          row.price_window,
+          row.price_tier,
+        ]
+          .filter(Boolean)
+          .join(' / '),
+      minWidth: 150,
     },
     {
       field: 'status',
       title: $t('ai-buddy-billing.usage.status'),
-      width: 110,
       slots: { default: 'ledgerStatus' },
+      width: 120,
     },
   ];
 }
@@ -518,53 +730,66 @@ export function usePriceColumns(
   onActionClick?: OnActionClickFn<AIBuddyBillingPriceResult>,
 ): VxeGridProps['columns'] {
   return [
-    { field: 'seq', title: $t('common.table.id'), type: 'seq', width: 50 },
+    { field: 'seq', title: $t('common.table.id'), type: 'seq', width: 60 },
     {
       field: 'provider_id',
       title: $t('ai-buddy-billing.price.provider'),
-      minWidth: 130,
       formatter: ({ cellValue }) => providerName(Number(cellValue)),
+      minWidth: 150,
     },
     {
       field: 'model_id',
       title: $t('ai-buddy-billing.price.model'),
-      minWidth: 180,
       showOverflow: 'tooltip',
+      minWidth: 220,
+    },
+    {
+      field: 'source',
+      title: $t('ai-buddy-billing.price.sourceLabel'),
+      slots: { default: 'source' },
+      width: 130,
+    },
+    {
+      field: 'time_windows',
+      title: $t('ai-buddy-billing.price.features'),
+      showOverflow: 'tooltip',
+      formatter: ({ row }) => priceFeatureText(row),
+      minWidth: 190,
     },
     {
       field: 'input_price',
       title: $t('ai-buddy-billing.price.inputPrice'),
-      width: 120,
       align: 'right',
-      formatter: ({ cellValue }) => formatBillingAmount(cellValue),
+      formatter: ({ cellValue }) => formatBillingUnitPrice(cellValue),
+      width: 130,
     },
     {
       field: 'output_price',
       title: $t('ai-buddy-billing.price.outputPrice'),
-      width: 120,
       align: 'right',
-      formatter: ({ cellValue }) => formatBillingAmount(cellValue),
+      formatter: ({ cellValue }) => formatBillingUnitPrice(cellValue),
+      width: 130,
     },
     {
       field: 'cache_read_price',
       title: $t('ai-buddy-billing.price.cacheReadPrice'),
-      width: 130,
       align: 'right',
-      formatter: ({ cellValue }) => formatBillingAmount(cellValue),
+      formatter: ({ cellValue }) => formatBillingUnitPrice(cellValue),
+      width: 140,
     },
     {
       field: 'cache_write_price',
       title: $t('ai-buddy-billing.price.cacheWritePrice'),
-      width: 130,
       align: 'right',
-      formatter: ({ cellValue }) => formatBillingAmount(cellValue),
+      formatter: ({ cellValue }) => formatBillingUnitPrice(cellValue),
+      width: 140,
     },
     {
       field: 'image_price',
       title: $t('ai-buddy-billing.price.imagePrice'),
-      width: 110,
       align: 'right',
-      formatter: ({ cellValue }) => formatBillingAmount(cellValue),
+      formatter: ({ cellValue }) => formatBillingUnitPrice(cellValue),
+      width: 120,
     },
     {
       field: 'effective_from',
@@ -581,8 +806,8 @@ export function usePriceColumns(
     {
       field: 'active',
       title: $t('ai-buddy-billing.price.effective'),
-      width: 100,
       slots: { default: 'active' },
+      width: 110,
     },
     {
       field: 'created_time',
@@ -625,42 +850,42 @@ export function useAccountColumns(
   onActionClick?: OnActionClickFn<AIBuddyBillingAccountResult>,
 ): VxeGridProps['columns'] {
   return [
-    { field: 'seq', title: $t('common.table.id'), type: 'seq', width: 50 },
+    { field: 'seq', title: $t('common.table.id'), type: 'seq', width: 60 },
     {
       field: 'user_id',
       title: $t('ai-buddy-billing.account.userId'),
-      width: 100,
+      minWidth: 110,
     },
     {
       field: 'balance',
       title: $t('ai-buddy-billing.account.balance'),
-      width: 140,
       align: 'right',
       formatter: ({ cellValue }) => formatBillingAmount(cellValue),
+      minWidth: 140,
     },
     {
       field: 'currency',
       title: $t('ai-buddy-billing.account.currency'),
-      width: 90,
+      minWidth: 100,
     },
     {
       field: 'version',
       title: $t('ai-buddy-billing.account.version'),
-      width: 100,
       align: 'right',
+      minWidth: 110,
     },
     {
       field: 'updated_time',
       title: $t('common.table.updated_time'),
-      width: 168,
       formatter: 'formatDateTime',
+      minWidth: 180,
     },
     {
       field: 'operation',
       title: $t('common.table.operation'),
       align: 'center',
       fixed: 'right',
-      width: 200,
+      width: 240,
       cellRender: {
         attrs: {
           nameField: 'user_id',
@@ -669,6 +894,10 @@ export function useAccountColumns(
         },
         name: 'CellOperation',
         options: [
+          {
+            code: 'transactions',
+            text: $t('ai-buddy-billing.account.transactions'),
+          },
           {
             code: 'recharge',
             text: $t('ai-buddy-billing.account.recharge'),
@@ -680,109 +909,119 @@ export function useAccountColumns(
   ];
 }
 
-export function useTransactionColumns(): VxeGridProps['columns'] {
-  return [
-    { field: 'seq', title: $t('common.table.id'), type: 'seq', width: 50 },
+export function useTransactionColumns(
+  options: { showUserId?: boolean } = {},
+): VxeGridProps['columns'] {
+  const columns: VxeGridProps['columns'] = [
+    { field: 'seq', title: $t('common.table.id'), type: 'seq', width: 60 },
     {
       field: 'created_time',
       title: $t('ai-buddy-billing.account.time'),
-      width: 168,
       formatter: 'formatDateTime',
-    },
-    {
-      field: 'user_id',
-      title: $t('ai-buddy-billing.account.userId'),
-      width: 100,
+      minWidth: 168,
     },
     {
       field: 'transaction_type',
       title: $t('ai-buddy-billing.account.transactionType'),
-      width: 110,
       slots: { default: 'transactionType' },
+      minWidth: 120,
     },
     {
       field: 'amount',
       title: $t('ai-buddy-billing.account.amount'),
-      width: 120,
       align: 'right',
       formatter: ({ cellValue }) => formatBillingAmount(cellValue),
+      minWidth: 130,
     },
     {
       field: 'balance_after',
       title: $t('ai-buddy-billing.account.balanceAfter'),
-      width: 130,
       align: 'right',
       formatter: ({ cellValue }) => formatBillingAmount(cellValue),
+      minWidth: 140,
     },
     {
       field: 'currency',
       title: $t('ai-buddy-billing.account.currency'),
-      width: 90,
+      minWidth: 100,
     },
     {
       field: 'reference_type',
       title: $t('ai-buddy-billing.account.reference'),
-      minWidth: 190,
-      formatter: ({ row }) => `${row.reference_type} / ${row.reference_id}`,
+      formatter: ({ row }) =>
+        row.reference_type
+          ? `${row.reference_type} / ${row.reference_id}`
+          : '-',
+      minWidth: 210,
     },
     {
       field: 'remark',
       title: $t('ai-buddy-billing.account.remark'),
-      minWidth: 160,
       showOverflow: 'tooltip',
+      minWidth: 180,
     },
   ];
+
+  if (options.showUserId) {
+    columns.splice(2, 0, {
+      field: 'user_id',
+      title: $t('ai-buddy-billing.account.userId'),
+      width: 100,
+    });
+  }
+
+  return columns;
 }
 
 export function useBudgetColumns(
   onActionClick?: OnActionClickFn<AIBuddyBillingBudgetResult>,
 ): VxeGridProps['columns'] {
   return [
-    { field: 'seq', title: $t('common.table.id'), type: 'seq', width: 50 },
+    { field: 'seq', title: $t('common.table.id'), type: 'seq', width: 60 },
     {
       field: 'user_id',
       title: $t('ai-buddy-billing.account.userId'),
-      width: 100,
+      minWidth: 110,
     },
     {
       field: 'window',
       title: $t('ai-buddy-billing.budget.window'),
-      width: 110,
       formatter: ({ cellValue }) =>
         budgetWindowLabel(cellValue as AIBuddyBillingBudgetWindow),
+      minWidth: 120,
     },
     {
       field: 'usd_limit',
       title: $t('ai-buddy-billing.budget.usdLimit'),
-      width: 130,
       align: 'right',
       formatter: ({ cellValue }) => formatBillingAmount(cellValue),
+      minWidth: 140,
     },
     {
       field: 'token_limit',
       title: $t('ai-buddy-billing.budget.tokenLimit'),
-      width: 140,
       align: 'right',
       formatter: ({ cellValue }) => formatBillingTokens(cellValue),
+      minWidth: 150,
     },
     {
       field: 'warn_at',
       title: $t('ai-buddy-billing.budget.warnAt'),
-      width: 110,
       align: 'right',
       formatter: ({ cellValue }) => formatBillingRatio(cellValue),
+      minWidth: 120,
     },
     {
       field: 'status',
       title: $t('ai-buddy-billing.budget.status'),
-      width: 90,
       cellRender: { name: 'CellTag' },
+      minWidth: 100,
     },
     {
       field: 'created_time',
       title: $t('common.table.created_time'),
-      width: 168,
       formatter: 'formatDateTime',
+      minWidth: 180,
     },
     {
       field: 'operation',

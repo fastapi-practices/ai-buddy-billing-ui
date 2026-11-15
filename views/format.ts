@@ -1,34 +1,57 @@
 import type { AIBuddyBillingDecimal } from '../api';
 
+import { convertBillingAmount, getBillingCurrency } from './currency';
+
 const EMPTY_VALUE = '-';
 const AMOUNT_LOCALE = 'en-US';
 const AMOUNT_MIN_DIGITS = 2;
-const AMOUNT_MAX_DIGITS = 4;
+const UNIT_PRICE_DIGITS = 6;
 
 /**
- * 格式化计费金额，后端 Decimal 可能以字符串返回
+ * 格式化计费金额
  *
- * @param value 金额
- * @param maxDigits 小数位上限
+ * 金额按展示币种换算后输出，小数位默认取后端展示配置
+ *
+ * @param value 结算币种金额
+ * @param maxDigits 小数位上限，用于单价等需要更高精度的场景
  * @returns 格式化文本
  */
 export function formatBillingAmount(
   value?: AIBuddyBillingDecimal | null,
-  maxDigits: number = AMOUNT_MAX_DIGITS,
+  maxDigits?: number,
 ): string {
   if (value === null || value === undefined || value === '') {
     return EMPTY_VALUE;
   }
 
-  const amount = Number(value);
+  const amount = convertBillingAmount(value);
   if (!Number.isFinite(amount)) {
     return EMPTY_VALUE;
   }
 
-  return amount.toLocaleString(AMOUNT_LOCALE, {
-    minimumFractionDigits: AMOUNT_MIN_DIGITS,
-    maximumFractionDigits: Math.max(AMOUNT_MIN_DIGITS, maxDigits),
+  const currency = getBillingCurrency();
+  const decimals = Math.max(
+    0,
+    Math.trunc(maxDigits ?? currency.decimals ?? AMOUNT_MIN_DIGITS),
+  );
+  const text = amount.toLocaleString(AMOUNT_LOCALE, {
+    minimumFractionDigits: Math.min(AMOUNT_MIN_DIGITS, decimals),
+    maximumFractionDigits: decimals,
   });
+
+  return `${currency.symbol}${text}`;
+}
+
+/**
+ * 格式化单价（每百万 token / 每张图片价格）
+ *
+ * @param value 结算币种单价
+ * @returns 格式化文本
+ */
+export function formatBillingUnitPrice(
+  value?: AIBuddyBillingDecimal | null,
+): string {
+  return formatBillingAmount(value, UNIT_PRICE_DIGITS);
 }
 
 /**
